@@ -65,6 +65,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('flows');
   const [loading, setLoading] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [debugMsg, setDebugMsg] = useState('');
 
   // Data states
   const [assets, setAssets] = useState(sampleAssets);
@@ -81,10 +82,19 @@ export default function App() {
 
   async function loadData() {
     setLoading(true);
+    setDebugMsg('Connecting to Supabase...');
     try {
       // 1. positioning_metrics → asset list + table
-      const { data: pos } = await sb!.from('positioning_metrics')
+      setDebugMsg('Fetching positioning_metrics...');
+      const { data: pos, error: posErr } = await sb!.from('positioning_metrics')
         .select('*').order('report_date', { ascending: false }).limit(300);
+      
+      if (posErr) {
+        setDebugMsg(`positioning_metrics error: ${posErr.message} (${posErr.code})`);
+        setLoading(false);
+        return;
+      }
+      setDebugMsg(`positioning_metrics: ${pos?.length || 0} rows`);
 
       if (pos && pos.length > 0) {
         // Get latest per asset
@@ -178,8 +188,9 @@ export default function App() {
       }
 
       setConnected(true);
-    } catch (err) {
-      console.error('Supabase error:', err);
+      setDebugMsg(`Connected! positioning: ${pos?.length || 0} rows`);
+    } catch (err: any) {
+      setDebugMsg(`Error: ${err.message || err}`);
     } finally {
       setLoading(false);
     }
@@ -246,6 +257,11 @@ export default function App() {
           </span>
         </div>
       </header>
+
+      {/* Debug bar - shows connection status */}
+      <div style={{ padding: '8px 20px', background: debugMsg.includes('Error') || debugMsg.includes('error') ? '#7f1d1d' : connected ? '#14532d' : '#422006', fontSize: 12, fontFamily: 'monospace', color: '#fbbf24' }}>
+        {sb ? debugMsg || 'Waiting...' : `No Supabase configured. URL="${sbUrl}" KEY="${sbKey ? sbKey.slice(0,10) + '...' : 'empty'}"`}
+      </div>
 
       <main style={{ padding: 20, maxWidth: 1400, margin: '0 auto' }}>
         {activeTab === 'flows' && <FlowsPage assets={assets} selectedAsset={selectedAsset} setSelectedAsset={setSelectedAsset} flowChartData={assetFlowChart} aggChartData={flowChartData} />}
