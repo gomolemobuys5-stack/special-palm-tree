@@ -109,8 +109,10 @@ export default function App() {
   const [selectedAsset, setSelectedAsset] = useState(sampleAssets[0]);
   const [tffRaw, setTffRaw] = useState<any[]>([]);
   const [pricesRaw, setPricesRaw] = useState<any[]>([]);
+  const [journalTrades, setJournalTrades] = useState<any[]>([]);
+  const [journalLoading, setJournalLoading] = useState(false);
 
-  useEffect(() => { if (sb) loadData(); }, []);
+  useEffect(() => { if (sb) loadData(); loadJournal(); }, []);
 
   // Recompute charts when lookback or selectedAsset changes
   useEffect(() => {
@@ -228,11 +230,24 @@ export default function App() {
     } finally { setLoading(false); }
   }
 
+  async function loadJournal() {
+    setJournalLoading(true);
+    try {
+      const res = await fetch('/api/journal');
+      if (!res.ok) throw new Error(`Journal API: ${res.status}`);
+      const data = await res.json();
+      if (data.trades) setJournalTrades(data.trades);
+    } catch (err: any) {
+      console.log('Journal not available:', err.message);
+    } finally { setJournalLoading(false); }
+  }
+
   const tabs = [
     { id: 'flows', label: 'Flows' },
     { id: 'regime', label: 'Regime' },
     { id: 'analytics', label: 'Analytics' },
     { id: 'reports', label: 'Reports' },
+    { id: 'journal', label: 'Journal' },
   ];
 
   return (
@@ -305,6 +320,7 @@ export default function App() {
             {activeTab === 'regime' && <RegimePage data={macroData} />}
             {activeTab === 'analytics' && <AnalyticsPage data={analyticsData} />}
             {activeTab === 'reports' && <ReportsPage data={reportsData} />}
+            {activeTab === 'journal' && <JournalPage trades={journalTrades} loading={journalLoading} onRefresh={loadJournal} />}
           </div>
         </main>
       </div>
@@ -621,6 +637,250 @@ function ReportsPage({ data }: any) {
 }
 
 // =====================================================
+// JOURNAL PAGE
+// =====================================================
+function JournalPage({ trades, loading, onRefresh }: { trades: any[]; loading: boolean; onRefresh: () => void }) {
+  // Calculate analytics
+  const totalTrades = trades.length;
+  const wins = trades.filter(t => t.result?.toLowerCase() === 'win');
+  const losses = trades.filter(t => t.result?.toLowerCase() === 'loss');
+  const winRate = totalTrades > 0 ? (wins.length / totalTrades * 100) : 0;
+  const totalPnL = trades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const avgWin = wins.length > 0 ? wins.reduce((s: number, t: any) => s + (t.pnl || 0), 0) / wins.length : 0;
+  const avgLoss = losses.length > 0 ? losses.reduce((s: number, t: any) => s + (t.pnl || 0), 0) / losses.length : 0;
+  const bestTrade = trades.length > 0 ? trades.reduce((best, t) => (t.pnl || 0) > (best.pnl || 0) ? t : best, trades[0]) : null;
+  const worstTrade = trades.length > 0 ? trades.reduce((worst, t) => (t.pnl || 0) < (worst.pnl || 0) ? t : worst, trades[0]) : null;
+
+  // P&L by asset
+  const pnlByAsset: Record<string, { pnl: number; count: number; wins: number }> = {};
+  trades.forEach(t => {
+    const a = t.asset || 'Unknown';
+    if (!pnlByAsset[a]) pnlByAsset[a] = { pnl: 0, count: 0, wins: 0 };
+    pnlByAsset[a].pnl += t.pnl || 0;
+    pnlByAsset[a].count++;
+    if (t.result?.toLowerCase() === 'win') pnlByAsset[a].wins++;
+  });
+  const assetData = Object.entries(pnlByAsset).map(([asset, d]) => ({ asset, ...d })).sort((a, b) => b.pnl - a.pnl);
+
+  // P&L by month
+  const pnlByMonth: Record<string, { pnl: number; count: number; wins: number }> = {};
+  trades.forEach(t => {
+    const m = t.month || 'Unknown';
+    if (!pnlByMonth[m]) pnlByMonth[m] = { pnl: 0, count: 0, wins: 0 };
+    pnlByMonth[m].pnl += t.pnl || 0;
+    pnlByMonth[m].count++;
+    if (t.result?.toLowerCase() === 'win') pnlByMonth[m].wins++;
+  });
+  const monthData = Object.entries(pnlByMonth).map(([month, d]) => ({ month, ...d }));
+
+  // Streak calculation
+  let currentStreak = 0;
+  let streakType = '';
+  let longestWinStreak = 0;
+  let longestLossStreak = 0;
+  let tempStreak = 0;
+  let tempType = '';
+  const sortedTrades = [...trades].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  sortedTrades.forEach(t => {
+    const r = t.result?.toLowerCase();
+    if (r === tempType) {
+      tempStreak++;
+    } else {
+      tempStreak = 1;
+      tempType = r;
+    }
+    if (r === 'win' && tempStreak > longestWinStreak) longestWinStreak = tempStreak;
+    if (r === 'loss' && tempStreak > longestLossStreak) longestLossStreak = tempStreak;
+    currentStreak = tempStreak;
+    streakType = tempType;
+  });
+
+  // P&L by direction
+  const longs = trades.filter(t => t.direction?.toLowerCase() === 'long');
+  const shorts = trades.filter(t => t.direction?.toLowerCase() === 'short');
+  const longPnL = longs.reduce((s, t) => s + (t.pnl || 0), 0);
+  const shortPnL = shorts.reduce((s, t) => s + (t.pnl || 0), 0);
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Trading Journal</h1>
+        <div style={{ padding: 40, textAlign: 'center', color: '#52525b' }}>Loading journal from Notion...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Trading Journal</h1>
+          <p style={{ fontSize: 12, color: '#52525b', marginTop: 4 }}>Synced from Notion • {totalTrades} trades logged</p>
+        </div>
+        <button onClick={onRefresh} style={{ padding: '8px 16px', fontSize: 12, fontWeight: 500, border: '1px solid #1e1f26', borderRadius: 6, background: 'transparent', color: '#a1a1aa', cursor: 'pointer' }}>
+          ↻ Refresh
+        </button>
+      </div>
+
+      {/* Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
+        <NumCard label="Total P&L" value={`${totalPnL >= 0 ? '+' : ''}$${totalPnL.toLocaleString()}`} color={totalPnL >= 0 ? '#22c55e' : '#ef4444'} />
+        <NumCard label="Win Rate" value={`${winRate.toFixed(1)}%`} color={winRate >= 50 ? '#22c55e' : '#ef4444'} />
+        <NumCard label="Total Trades" value={String(totalTrades)} color="#a1a1aa" />
+        <NumCard label="Wins / Losses" value={`${wins.length} / ${losses.length}`} color="#a1a1aa" />
+        <NumCard label="Avg Win" value={`+$${Math.round(avgWin).toLocaleString()}`} color="#22c55e" />
+        <NumCard label="Avg Loss" value={`$${Math.round(avgLoss).toLocaleString()}`} color="#ef4444" />
+      </div>
+
+      {/* Second Row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <NumCard label="Best Trade" value={bestTrade ? `+$${bestTrade.pnl?.toLocaleString()} (${bestTrade.asset})` : '—'} color="#22c55e" />
+        <NumCard label="Worst Trade" value={worstTrade ? `$${worstTrade.pnl?.toLocaleString()} (${worstTrade.asset})` : '—'} color="#ef4444" />
+        <NumCard label="Current Streak" value={`${currentStreak} ${streakType}${currentStreak !== 1 ? 's' : ''}`} color={streakType === 'win' ? '#22c55e' : streakType === 'loss' ? '#ef4444' : '#71717a'} />
+        <NumCard label="Long P&L / Short P&L" value={`$${longPnL.toLocaleString()} / $${shortPnL.toLocaleString()}`} color="#a1a1aa" />
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        {/* P&L by Asset */}
+        <Panel title="P&L by Asset">
+          {assetData.length > 0 ? (
+            <div style={{ height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={assetData} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 60 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e1f2630" horizontal={false} />
+                  <XAxis type="number" stroke="#52525b" fontSize={10} tickFormatter={v => `$${v}`} />
+                  <YAxis type="category" dataKey="asset" stroke="#52525b" fontSize={11} width={55} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 8 }} formatter={(v: any) => [`$${Number(v).toLocaleString()}`, 'P&L']} />
+                  <Bar dataKey="pnl" name="P&L" radius={[0, 4, 4, 0]}>
+                    {assetData.map((e, i) => (
+                      <Cell key={i} fill={e.pnl >= 0 ? '#22c55e' : '#ef4444'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div style={{ padding: 40, textAlign: 'center', color: '#52525b', fontSize: 13 }}>No trades yet</div>
+          )}
+        </Panel>
+
+        {/* P&L by Month */}
+        <Panel title="P&L by Month">
+          {monthData.length > 0 ? (
+            <div style={{ height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e1f2630" vertical={false} />
+                  <XAxis dataKey="month" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                  <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
+                  <Tooltip contentStyle={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 8 }} formatter={(v: any) => [`$${Number(v).toLocaleString()}`, 'P&L']} />
+                  <Bar dataKey="pnl" name="P&L" radius={[4, 4, 0, 0]}>
+                    {monthData.map((e, i) => (
+                      <Cell key={i} fill={e.pnl >= 0 ? '#22c55e' : '#ef4444'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div style={{ padding: 40, textAlign: 'center', color: '#52525b', fontSize: 13 }}>No trades yet</div>
+          )}
+        </Panel>
+      </div>
+
+      {/* Streaks + Direction Breakdown */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+        <Panel title="Streaks">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Current</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: streakType === 'win' ? '#22c55e' : '#ef4444' }}>{currentStreak} {streakType}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Best Win Streak</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#22c55e' }}>{longestWinStreak}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Worst Loss Streak</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#ef4444' }}>{longestLossStreak}</span>
+            </div>
+          </div>
+        </Panel>
+
+        <Panel title="Direction Breakdown">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Long Trades</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace' }}>{longs.length} ({longs.length > 0 ? (longs.filter(t => t.result?.toLowerCase() === 'win').length / longs.length * 100).toFixed(0) : 0}% WR)</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Long P&L</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace', color: longPnL >= 0 ? '#22c55e' : '#ef4444' }}>${longPnL.toLocaleString()}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Short Trades</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace' }}>{shorts.length} ({shorts.length > 0 ? (shorts.filter(t => t.result?.toLowerCase() === 'win').length / shorts.length * 100).toFixed(0) : 0}% WR)</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: '#a1a1aa' }}>Short P&L</span>
+              <span style={{ fontSize: 13, fontFamily: 'monospace', color: shortPnL >= 0 ? '#22c55e' : '#ef4444' }}>${shortPnL.toLocaleString()}</span>
+            </div>
+          </div>
+        </Panel>
+
+        <Panel title="Win Rate by Asset">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {assetData.slice(0, 6).map(a => (
+              <div key={a.asset} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: '#a1a1aa' }}>{a.asset}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <PctBar value={a.count > 0 ? (a.wins / a.count) * 100 : 0} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      {/* Trade Log Table */}
+      <Panel title="Trade Log" subtitle="All entries from Notion">
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #1e1f26' }}>
+                {['Trade', 'Month', 'Asset', 'Direction', 'P&L', 'Result', 'Notes'].map((h, i) => (
+                  <th key={h} style={{ padding: '10px 14px', fontSize: 10, fontWeight: 600, color: '#52525b', textAlign: i === 0 || i === 6 ? 'left' : 'right', textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {trades.length === 0 ? (
+                <tr><td colSpan={7} style={{ padding: 40, textAlign: 'center', color: '#52525b', fontSize: 13 }}>No trades logged yet. Add trades in your Notion Trade Journal database.</td></tr>
+              ) : (
+                trades.map((t: any) => (
+                  <tr key={t.id} style={{ borderBottom: '1px solid #1e1f2640' }}>
+                    <td style={{ padding: '12px 14px', fontSize: 13, fontWeight: 500 }}>{t.trade}</td>
+                    <td style={{ padding: '12px 14px', fontSize: 12, color: '#71717a', textAlign: 'right' }}>{t.month}</td>
+                    <td style={{ padding: '12px 14px', fontSize: 12, textAlign: 'right' }}>{t.asset}</td>
+                    <td style={{ padding: '12px 14px', fontSize: 12, textAlign: 'right', color: t.direction?.toLowerCase() === 'long' ? '#22c55e' : '#ef4444' }}>{t.direction}</td>
+                    <td style={{ padding: '12px 14px', fontSize: 12, fontFamily: 'monospace', textAlign: 'right', fontWeight: 600, color: (t.pnl || 0) >= 0 ? '#22c55e' : '#ef4444' }}>
+                      {(t.pnl || 0) >= 0 ? '+' : ''}${(t.pnl || 0).toLocaleString()}
+                    </td>
+                    <td style={{ padding: '12px 14px', textAlign: 'right' }}><Badge label={t.result} /></td>
+                    <td style={{ padding: '12px 14px', fontSize: 12, color: '#71717a', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.notes}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// =====================================================
 // PROJECT LOG (Side Panel)
 // =====================================================
 function ProjectLog() {
@@ -796,3 +1056,4 @@ function fmtDelta(n: number): string {
   if (n == null) return '—';
   return `${n >= 0 ? '+' : ''}${fmtNum(n)}`;
 }
+
