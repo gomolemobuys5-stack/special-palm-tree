@@ -10,12 +10,12 @@
     "vercel-build": "npm install && vite build"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.108.2",
+    "@supabase/supabase-js": "2.49.8",
     "@tailwindcss/vite": "4.1.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "4.5.2",
-    "lightweight-charts": "^5.2.0",
+    "lightweight-charts": "5.0.5",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "recharts": "2.15.4",
